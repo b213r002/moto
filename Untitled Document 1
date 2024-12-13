@@ -1,0 +1,156 @@
+CSVデータから試合内容を読み込む処理を行うプログラム---
+import pandas as pd
+import numpy as np
+
+class MatchLoader:
+    def load_match_info(self):
+        # CSV読み込み
+        csv_data = pd.read_csv("W.csv")
+
+        # 1行目はヘッダになっているため削除する
+        csv_data = csv_data.drop(index=csv_data[csv_data["transcript"].str.contains("transcript")].index)
+
+        # 正規表現を使って2文字ずつ切り出す
+        extract_one_hand = csv_data["transcript"].str.extractall(r'(..)')
+
+        # Indexを再構成して、1行1手の表にする
+        # 試合の切り替わり判定のためtournamentIdも残しておく
+        one_hand_df = extract_one_hand.reset_index().rename(columns={"level_0": "tournamentId", "match": "move_no", 0: "move_str"})
+
+        # アルファベットを数字に変換するテーブル
+        conv_table = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}
+        one_hand_df["move"] = one_hand_df.apply(lambda x: self.convert_move(x["move_str"], conv_table), axis=1)
+
+        return one_hand_df
+
+    # 1手を数値に変換する
+    def convert_move(self, v, conv_table):
+        l = conv_table[v[:1]]  # 列の値を変換する
+        r = int(v[1:])         # 行の値を変換する
+        return np.array([l - 1, r - 1], dtype='int8')
+
+# 使用例
+loader = MatchLoader()
+match_df = loader.load_match_info()
+print(match_df.head())
+------
+---盤面情報をそのまま配列に変換するのではなく白色の石の配置情報と黒色の配置情報を別々の配列に分けて2つあわせて現在の盤面情報するためCSVから読み込んだデータから盤面情報を求める処理を行うプログラム--
+import pandas as pd
+import numpy as np
+
+class MatchLoader:
+    def load_match_info(self):
+        # CSV読み込み
+        csv_data = pd.read_csv("W.csv")
+
+        # 1行目はヘッダになっているため削除する
+        csv_data = csv_data.drop(index=csv_data[csv_data["transcript"].str.contains("transcript")].index)
+
+        # 正規表現を使って2文字ずつ切り出す
+        extract_one_hand = csv_data["transcript"].str.extractall(r'(..)')
+
+        # Indexを再構成して、1行1手の表にする
+        # 試合の切り替わり判定のためtournamentIdも残しておく
+        one_hand_df = extract_one_hand.reset_index().rename(columns={"level_0": "tournamentId", "match": "move_no", 0: "move_str"})
+
+        # アルファベットを数字に変換するテーブル
+        conv_table = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}
+        one_hand_df["move"] = one_hand_df.apply(lambda x: self.convert_move(x["move_str"], conv_table), axis=1)
+
+        return one_hand_df
+
+    # 1手を数値に変換する
+    def convert_move(self, v, conv_table):
+        l = conv_table[v[:1]]  # 列の値を変換する
+        r = int(v[1:])         # 行の値を変換する
+        return np.array([l - 1, r - 1], dtype='int8')
+
+# 使用例
+loader = MatchLoader()
+match_df = loader.load_match_info()
+print(match_df.head())
+-------------
+-----モデルの生成を行うプログラム------------
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+class OthelloAIModel:
+    def create_model(self):
+        # Biasクラスの修正
+        class Bias(keras.layers.Layer):
+            def __init__(self, input_shape):
+                super(Bias, self).__init__()
+                self.W = self.add_weight(shape=(input_shape[1:]), 
+                                         initializer='zeros', 
+                                         trainable=True)
+                
+            def call(self, inputs):
+                return inputs + self.W
+
+        # モデルの構築
+        model = keras.Sequential()
+
+        # 入力の形状変換
+        model.add(layers.Permute((2, 3, 1), input_shape=(2, 8, 8)))
+
+        # 畳み込み層と活性化関数
+        for _ in range(6):  # 層の数を減らす
+            model.add(layers.Conv2D(128, kernel_size=3, padding='same', activation='relu'))
+            model.add(layers.BatchNormalization())  # 正則化
+
+        # 出力層
+        model.add(layers.Conv2D(1, kernel_size=1, use_bias=False))
+        model.add(layers.Flatten())
+        
+        # Biasクラスを追加
+        model.add(Bias((1, 64)))
+
+        # 出力にソフトマックス関数
+        model.add(layers.Activation('softmax'))
+
+        # コンパイル時の変更
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001),  # Adamを使用
+                      loss='categorical_crossentropy',
+                      metrics=['accuracy'])
+
+        return model
+
+---------------------
+モデルの学習を行うプログラム---------------
+import numpy as np
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+def training(self, model, epochs=1000, batch_size=32, save_path='saved_model_reversi/my_model'):
+    # データの準備
+    x_train = np.concatenate([self.my_board_infos, self.enemy_board_infos])
+    y_train_tmp = np.concatenate([self.my_put_pos, self.enemy_put_pos])
+    
+    # 教師データをサイズ64の1次元配列に変換
+    y_train = y_train_tmp.reshape(-1, 64)
+
+    # データのシャッフル
+    indices = np.arange(x_train.shape[0])
+    np.random.shuffle(indices)
+    x_train = x_train[indices]
+    y_train = y_train[indices]
+
+    # EarlyStoppingとModelCheckpointのコールバックを設定
+    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    model_checkpoint = ModelCheckpoint(filepath=save_path + '_best.h5', monitor='val_loss', save_best_only=True)
+
+    try:
+        # 学習を開始
+        model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, 
+                  validation_split=0.2, 
+                  callbacks=[early_stopping, model_checkpoint])
+    except KeyboardInterrupt:
+        # 学習中に途中で中断された場合に途中結果を出力
+        model.save(save_path + '_interrupt.h5')
+        print('Output saved due to interruption.')
+        return
+
+    # 学習が終了したら指定パスに結果を出力
+    model.save(save_path)
+    print('Training complete. Model saved at:', save_path)
+----------------------------------------

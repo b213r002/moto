@@ -1,0 +1,182 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import time  # Importing time module for measuring training duration
+import random
+
+class MatchLoader:
+    def __init__(self, csv_file):
+        self.csv_file = csv_file
+    
+    def load_match_info(self):
+        """CSVファイルから試合内容を読み込む"""
+        try:
+            csv_data = pd.read_csv(self.csv_file, header=None)
+            move_sequences = csv_data.iloc[:, -1]
+            extract_one_hand = move_sequences.str.extractall(r'(..)')
+
+            one_hand_df = extract_one_hand.reset_index().rename(
+                columns={"level_0": "tournamentId", "level_1": "match", 0: "move_str"}
+            )
+
+            conv_table = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}
+            one_hand_df["move"] = one_hand_df["move_str"].apply(lambda x: self.convert_move(x, conv_table))
+            
+            return one_hand_df
+        except Exception as e:
+            print(f"試合情報の読み込み中にエラーが発生しました: {e}")
+            return None
+
+    def convert_move(self, move_str, conv_table):
+        """1手を数値に変換する"""
+        col = conv_table[move_str[0]]
+        row = int(move_str[1])
+        return np.array([col - 1, row - 1], dtype='int8')
+
+
+class ReversiProcessor:
+    def __init__(self):
+        self.table_info = np.zeros(100, dtype='int8')  # 10x10のボード
+        self.my_board_infos = []
+        self.enemy_board_infos = []
+        self.my_put_pos = []
+        self.enemy_put_pos = []
+        self.turn_color = 1
+        self.now_tournament_id = None
+
+    def process_tournament(self, df):
+        """試合の進行を処理"""
+        if df["tournamentId"] != self.now_tournament_id:
+            self.reset_board()
+            self.now_tournament_id = df["tournamentId"]
+        else:
+            self.turn_color = 1 if self.turn_color == 2 else 2
+
+        if not self.GetCanPutPos(self.turn_color):
+            self.turn_color = 1 if self.turn_color == 2 else 2
+
+        put_pos = df["move"]
+        self.record_training_data(put_pos)
+        self.PutStone(put_pos)
+
+    def reset_board(self):
+        """盤面をリセットする"""
+        self.table_info.fill(0)
+        self.table_info[44] = 2
+        self.table_info[45] = 1
+        self.table_info[54] = 1
+        self.table_info[55] = 2
+
+    def record_training_data(self, put_pos):
+        """訓練用データを記録"""
+        my_board_info = np.zeros((8, 8), dtype="int8")
+        enemy_board_info = np.zeros((8, 8), dtype="int8")
+
+        for i in range(11, 89):
+            if i % 10 in {0, 9}:
+                continue
+            board_x = (i % 10) - 1
+            board_y = (i // 10) - 1
+
+            if self.table_info[i] == 1:
+                my_board_info[board_y][board_x] = 1
+            elif self.table_info[i] == 2:
+                enemy_board_info[board_y][board_x] = 1
+
+        move_one_hot = np.zeros((8, 8), dtype='int8')
+        move_one_hot[put_pos[1]][put_pos[0]] = 1
+
+        if self.turn_color == 1:
+            self.my_board_infos.append(np.array([my_board_info, enemy_board_info], dtype="int8"))
+            self.my_put_pos.append(move_one_hot)
+        else:
+            self.enemy_board_infos.append(np.array([enemy_board_info, my_board_info], dtype="int8"))
+            self.enemy_put_pos.append(move_one_hot)
+
+    def GetCanPutPos(self, turn_color):
+        """置ける場所をリストとして返す"""
+        return [pos for pos in range(100) if self.table_info[pos] == 0]
+
+    def PutStone(self, put_pos):
+        """石を置く処理"""
+        put_index = put_pos[0] + put_pos[1] * 10
+        self.table_info[put_index] = self.turn_color
+
+from tqdm import tqdm
+class ReversiModel:
+    def __init__(self, my_board_infos, enemy_board_infos, my_put_pos, enemy_put_pos):
+        self.my_board_infos = my_board_infos
+        self.enemy_board_infos = enemy_board_infos
+        self.my_put_pos = my_put_pos
+        self.enemy_put_pos = enemy_put_pos
+        self.model = self.create_model()
+
+    def create_model(self):
+        """ニューラルネットワークモデルの作成"""
+        class Bias(layers.Layer):
+            def __init__(self, input_shape):
+                super(Bias, self).__init__()
+                self.W = tf.Variable(initial_value=tf.zeros(input_shape), trainable=True)
+
+            def call(self, inputs):
+                return inputs + self.W
+
+        model = keras.Sequential()
+        model.add(layers.Permute((2, 3, 1), input_shape=(2, 8, 8)))
+        for _ in range(7):
+            model.add(layers.Conv2D(128, kernel_size=3, padding='same', activation='relu'))
+        model.add(layers.Conv2D(1, kernel_size=1, use_bias=False))
+        model.add(layers.Flatten())
+        model.add(Bias((64,)))
+        model.add(layers.Activation('softmax'))
+
+        model.compile(optimizer=keras.optimizers.SGD(learning_rate=0.01),
+                      loss='categorical_crossentropy', metrics=['accuracy'])
+
+        print('モデルは正常に作成されました。')
+        return model
+
+    def training(self):
+        """モデルの訓練"""
+        x_train = np.concatenate([self.my_board_infos, self.enemy_board_infos])
+        y_train_tmp = np.concatenate([self.my_put_pos, self.enemy_put_pos])
+        y_train = y_train_tmp.reshape(-1, 64)
+
+
+        # Tensor Boardコールバックの設定
+        tb_cb = keras.callbacks.TensorBoard(log_dir='model_log/relu_7', histogram_freq=1, write_graph=True)
+
+        start_time = time.time()  # 訓練開始時間
+
+        try:
+            self.model.fit(x_train, y_train, epochs=200, batch_size=32, validation_split=0.2, callbacks=[tb_cb])
+        except KeyboardInterrupt:
+            self.model.save('saved_model_reversi/my_model_interrupt')
+            print('中断しました。モデルを保存しました。')
+            return
+
+        end_time = time.time()  # 訓練終了時間
+        training_time = end_time - start_time  # 訓練にかかった時間
+        print(f'訓練が完了しました。モデルを保存しました。訓練時間: {training_time:.2f}秒')
+
+        self.model.save('saved_model_reversi/my_model')
+
+if __name__ == "__main__":
+    match_loader = MatchLoader("a.csv")
+    one_hand_df = match_loader.load_match_info()
+
+    reversi_processor = ReversiProcessor()
+    for _, row in one_hand_df.iterrows():
+        reversi_processor.process_tournament(row)
+
+    # Processorからモデルにトレーニングデータを渡す
+    reversi_model = ReversiModel(
+        reversi_processor.my_board_infos,
+        reversi_processor.enemy_board_infos,
+        reversi_processor.my_put_pos,
+        reversi_processor.enemy_put_pos
+    )
+    
+    reversi_model.training()
